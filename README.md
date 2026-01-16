@@ -1,1 +1,67 @@
-# MLOPS_end_to_end_cloud_native
+# mlops-shared-volume
+
+## Architecture
+
+This repository orchestrates a local Kubernetes (minikube) MLOps blueprint that relies on one shared PVC mounted at `/shared` across ingestion, feature, training, serving, and monitoring workloads. The flow is:
+
+1. **Ingestion** writes raw CSVs to `/shared/data/raw` and versioning is enforced via DVC.
+2. **Feature engineering** consumes raw files and emits featurized Parquet files under `/shared/data/features`.
+3. **Feast** ingests features from the filesystem for offline access and mirrors them into Redis as the online store.
+4. **Linear regression training** loads the offline features via Feast, derives a NumPy-based model, logs experiments in MLflow under `/shared/mlruns`, and registers the artifacts.
+5. **Serving (WSGI)** pulls the latest production MLflow model, resolves feature values via Feast online store, and exposes Prometheus counters directly from the lightweight WSGI handler.
+6. **Helm chart** defines the PVC, Kubernetes jobs, and deployments so every component mounts the same volume.
+
+## Prerequisites
+
+- Docker and minikube installed and configured with the Docker driver.
+- Helm 3, kubectl, DVC, MLflow, Feast CLI, and Python 3.11+ available locally.
+
+## Step-by-step commands
+
+1. `make up` – starts minikube, ensures the metrics server, and deploys the Helm chart that creates the shared PVC, Redis, and placeholders for the workloads.
+2. `make ingest` – runs the ingestion job that generates synthetic CSVs into `/shared/data/raw`.
+3. `make features` – executes the feature job to materialize `/shared/data/features` and registers them with Feast.
+4. `make train` – schedules the training job that generates its own NumPy/pandas dataset, fits the linear regression locally, logs metrics to MLflow, and writes the serialized `mlflow` model under `/shared/mlruns` on the PVC. Rebuild the training container after editing the code or requirements so Minikube sees the latest version (the job sets `imagePullPolicy: IfNotPresent`):
+
+```sh
+docker build -t mlops-training:latest apps/training
+minikube image load mlops-training:latest
+```
+
+Build the serving image once so the lightweight WSGI server does not need to reinstall dependencies on each restart:
+
+```sh
+docker build -t mlops-serving:latest apps/serving
+minikube image load mlops-serving:latest
+```
+
+5. `make serve` – deploys the serving job that installs the minimal requirements, runs `apps/serving/app.py`, and exposes `/predict` plus `/metrics` from the WSGI app.
+   * Optional: `make ingest` and `make features` still exist to show how raw data feeds Feast/Redis, but the trainer no longer depends on them to produce a model (they can be re-run if you want real Feast materializations).
+6. `curl localhost:8000/predict` – hit the serving endpoint to validate the entire DAG.
+7. `make down` – removes the Helm release and stops minikube.
+
+## Debug
+
+- Check PVC contents: `minikube ssh -- ls /shared`
+- Job logs: `kubectl -n mlops logs job/<name>`
+- Helm resources: `helm -n mlops status $(HELM_RELEASE)`.
+- Feast materialization: use `feast materialize` against the files in `/shared/data/features`.
+- MLflow UI: `mlflow ui --backend-store-uri /shared/mlruns --host 0.0.0.0 --port 5000` inside a pod that mounts the PVC.
+
+## Limitations
+
+- Minimal synthetic data and NumPy/pandas model; no real dataset or hyperparameter sweep.
+- Training job is a single linear-regression run; no autoscaling or distributed compute.
+- No advanced monitoring besides Prometheus counters exposed through the WSGI endpoint.
+- No backup or multi-zone redundancy for the shared PVC.
+
+## Migration path toward a lakehouse
+
+1. Replace `/shared/data/raw` and `/shared/data/features` with a Delta/Parquet lakehouse, introducing storage like MinIO or local S3-compatible service.
+2. Point Feast offline store to the lakehouse tables and use Spark/Arrow connectors for ingestion.
+3. Swap the linear regression job for a fuller training script (Spark, Ray, PyTorch, etc.) that consumes from the lakehouse and persists outputs into a catalog.
+4. Introduce a metadata layer (e.g., Amundsen/Atlas) backed by the lakehouse for lineage and governance.
+
+## Simplified storage option
+
+- The Helm chart exposes `sharedVolume.useHostPath` in `helm/shared-volume/values.yaml`. It defaults to `true`, so all workloads mount the same host path (`/tmp/mlops-shared` by default) and you no longer need a PVC or storage class while running locally. Set `sharedVolume.useHostPath=false` to switch back to a PVC once you need a storage class or shared volume with stronger guarantees.
