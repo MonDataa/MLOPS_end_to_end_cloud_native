@@ -3,7 +3,12 @@ CHART_DIR=helm/shared-volume
 SHARED_PATH=/tmp/mlops-shared
 HELM_SET=--set sharedVolume.useHostPath=true --set sharedVolume.hostPath=$(SHARED_PATH)
 
+ARGO_APP=argo/application.yaml
+ARGO_NAMESPACE=argocd
+ARGO_APP_NAME=mlops-shared-volume
+
 .PHONY: up ingest features train serve down images build-images
+.PHONY: argo-apply argo-sync argo-get argo-delete
 
 up:
 	minikube start --driver=docker --addons metrics-server
@@ -38,3 +43,15 @@ serve:
 down:
 	helm -n mlops uninstall $(HELM_RELEASE)
 	minikube stop
+
+argo-apply:
+	kubectl apply -n $(ARGO_NAMESPACE) -f $(ARGO_APP)
+
+argo-delete:
+	kubectl delete -n $(ARGO_NAMESPACE) -f $(ARGO_APP)
+
+argo-sync:
+	argocd app sync $(ARGO_APP_NAME)
+
+argo-get:
+	argocd app get $(ARGO_APP_NAME)

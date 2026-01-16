@@ -11,6 +11,8 @@ mlruns/
 
 # Kubernetes
 *.yaml
+!argo/*.yaml
+!gitops/**/*.yaml
 
 # Python env
 env/

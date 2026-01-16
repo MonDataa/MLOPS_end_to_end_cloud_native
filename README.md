@@ -40,6 +40,27 @@ minikube image load mlops-serving:latest
 6. `curl localhost:8000/predict` – hit the serving endpoint to validate the entire DAG.
 7. `make down` – removes the Helm release and stops minikube.
 
+## Argo CD integration
+
+The repo now uses the recommended App-of-Apps pattern. `argo/application.yaml` points at the `gitops/apps/` directory, and that folder contains a child application (`gitops/apps/mlops-shared-volume/application.yaml`) which deploys `helm/shared-volume`.
+
+1. Install Argo CD via Helm (or your preferred method) into `argocd` namespace and ensure you can reach the API server (`argocd login …`).
+2. Update both `argo/application.yaml` and `gitops/apps/mlops-shared-volume/application.yaml` so `repoURL` points to your actual Git repository.
+3. Apply the root application into Argo:
+   ```sh
+   kubectl apply -f argo/application.yaml
+   ```
+4. Trigger and monitor syncs:
+   ```sh
+   argocd app sync mlops-root
+   argocd app get mlops-root
+   argocd app diff mlops-root
+   ```
+   Argo CD will recursively create the nested `mlops-shared-volume` application, manage the Helm release in `mlops`, and keep it reconciled with Git.
+5. After you push new training/serving images, rebuild them (`make build-images`), run your jobs (`make train`/`make serve` or let Argo handle them), then re-sync with `argocd app sync mlops-root`.
+
+The `Makefile` now includes `argo-apply`, `argo-sync`, `argo-get`, and `argo-delete` helpers to control this workflow without manually typing the CLI commands.
+
 ## Debug
 
 - Check PVC contents: `minikube ssh -- ls /shared`
