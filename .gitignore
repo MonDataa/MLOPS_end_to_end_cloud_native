@@ -13,6 +13,7 @@ mlruns/
 *.yaml
 !argo/*.yaml
 !gitops/**/*.yaml
+!helm/**/*.yaml
 
 # Python env
 env/

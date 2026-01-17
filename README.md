@@ -18,7 +18,7 @@ This repository orchestrates a local Kubernetes (minikube) MLOps blueprint that 
 
 ## Step-by-step commands
 
-1. `make up` – starts minikube, ensures the metrics server, and deploys the Helm chart that creates the shared PVC, Redis, and placeholders for the workloads.
+1. `make up` – starts minikube, ensures the metrics server, and deploys the Helm chart that creates the shared PVC, Redis, and placeholders for the workloads. When you run Helm manually, prefix the chart directory with `./` (for example `helm upgrade --install mlops-shared-volume ./helm/shared-volume`) so Helm treats it as a local chart instead of trying to resolve a repo named `helm`.
 2. `make ingest` – runs the ingestion job that generates synthetic CSVs into `/shared/data/raw`.
 3. `make features` – executes the feature job to materialize `/shared/data/features` and registers them with Feast.
 4. `make train` – schedules the training job that generates its own NumPy/pandas dataset, fits the linear regression locally, logs metrics to MLflow, and writes the serialized `mlflow` model under `/shared/mlruns` on the PVC. Rebuild the training container after editing the code or requirements so Minikube sees the latest version (the job sets `imagePullPolicy: IfNotPresent`):
@@ -85,4 +85,4 @@ The `Makefile` now includes `argo-apply`, `argo-sync`, `argo-get`, and `argo-del
 
 ## Simplified storage option
 
-- The Helm chart exposes `sharedVolume.useHostPath` in `helm/shared-volume/values.yaml`. It defaults to `true`, so all workloads mount the same host path (`/tmp/mlops-shared` by default) and you no longer need a PVC or storage class while running locally. Set `sharedVolume.useHostPath=false` to switch back to a PVC once you need a storage class or shared volume with stronger guarantees.
+- The Helm chart exposes `sharedVolume.useHostPath` in `helm/shared-volume/values.yaml`. It now defaults to `false`, so workloads mount the shared PVC from `sharedVolume` instead of a host path. If you need the host-path shortcut while iterating locally, pass overrides to the Makefile (for example `make up HELM_SET="--set sharedVolume.useHostPath=true --set sharedVolume.hostPath=/tmp/mlops-shared"`) and prepare the directory on Minikube with `minikube ssh -- "sudo mkdir -p /tmp/mlops-shared && sudo chown docker:docker /tmp/mlops-shared"`.

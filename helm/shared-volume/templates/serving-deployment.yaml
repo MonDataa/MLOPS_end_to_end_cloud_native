@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlops-serving
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.serving.replicas }}
+  selector:
+    matchLabels:
+      app: mlops-serving
+  template:
+    metadata:
+      labels:
+        app: mlops-serving
+    spec:
+      initContainers:
+        - name: sync-repo
+          image: {{ .Values.images.sync }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while IFS== read -r key path; do
+                path="${path//$'\r'/}"
+                mkdir -p /shared/$(dirname "$path")
+                cp /repo/$key /shared/$path
+              done < /repo/manifest
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: repo
+              mountPath: /repo
+      containers:
+        - name: serving
+          image: {{ .Values.images.serving }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /app/app.py
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: file:///shared/mlruns
+            - name: SERVING_PORT
+              value: "{{ .Values.serving.port }}"
+          ports:
+            - containerPort: {{ .Values.serving.port }}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      volumes:
+        - name: shared
+{{- if .Values.sharedVolume.useHostPath }}
+          hostPath:
+            path: {{ .Values.sharedVolume.hostPath }}
+            type: DirectoryOrCreate
+{{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.name }}
+{{- end }}
+        - name: repo
+          configMap:
+            name: mlops-app-repo

@@ -1,0 +1,10 @@
+project: mlops_shared_volume
+registry: ../registry.db
+provider: local
+
+online_store:
+  type: redis
+  connection_string: redis:6379
+
+offline_store:
+  type: file

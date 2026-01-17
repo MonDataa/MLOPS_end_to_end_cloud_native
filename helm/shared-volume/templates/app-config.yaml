@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlops-app-repo
+  namespace: {{ .Release.Namespace }}
+data:
+  apps_ingestion_ingest_py: |-
+{{ .Files.Get "files/apps/ingestion/ingest.py" | indent 4 }}
+  apps_features_build_features_py: |-
+{{ .Files.Get "files/apps/features/build_features.py" | indent 4 }}
+  apps_training_train_py: |-
+{{ .Files.Get "files/apps/training/train.py" | indent 4 }}
+  apps_training_tune_py: |-
+{{ .Files.Get "files/apps/training/tune.py" | indent 4 }}
+  apps_training_requirements_txt: |-
+{{ .Files.Get "files/apps/training/requirements.txt" | indent 4 }}
+  apps_serving_app_py: |-
+{{ .Files.Get "files/apps/serving/app.py" | indent 4 }}
+  apps_serving_requirements_txt: |-
+{{ .Files.Get "files/apps/serving/requirements.txt" | indent 4 }}
+  apps_monitoring_metrics_py: |-
+{{ .Files.Get "files/apps/monitoring/metrics.py" | indent 4 }}
+  apps___init___py: |-
+{{ .Files.Get "files/apps/__init__.py" | indent 4 }}
+  apps_serving___init___py: |-
+{{ .Files.Get "files/apps/serving/__init__.py" | indent 4 }}
+  feast_feature_repo_feature_store_yaml: |-
+{{ .Files.Get "files/feast/feature_repo/feature_store.yaml" | indent 4 }}
+  feast_feature_repo_entities_py: |-
+{{ .Files.Get "files/feast/feature_repo/entities.py" | indent 4 }}
+  feast_feature_repo_feature_views_py: |-
+{{ .Files.Get "files/feast/feature_repo/feature_views.py" | indent 4 }}
+  feast_feature_repo_services_py: |-
+{{ .Files.Get "files/feast/feature_repo/services.py" | indent 4 }}
+  feast_feature_repo___init___py: |-
+{{ .Files.Get "files/feast/feature_repo/__init__.py" | indent 4 }}
+  feast_registry_db: |-
+{{ .Files.Get "files/feast/registry.db" | indent 4 }}
+  manifest: |-
+    apps_ingestion_ingest_py=apps/ingestion/ingest.py
+    apps_features_build_features_py=apps/features/build_features.py
+    apps_training_train_py=apps/training/train.py
+    apps_training_tune_py=apps/training/tune.py
+    apps_serving_app_py=apps/serving/app.py
+    apps_serving_requirements_txt=apps/serving/requirements.txt
+    apps_monitoring_metrics_py=apps/monitoring/metrics.py
+    apps___init___py=apps/__init__.py
+    apps_serving___init___py=apps/serving/__init__.py
+    feast_feature_repo_feature_store_yaml=feast/feature_repo/feature_store.yaml
+    feast_feature_repo_entities_py=feast/feature_repo/entities.py
+    feast_feature_repo_feature_views_py=feast/feature_repo/feature_views.py
+    feast_feature_repo_services_py=feast/feature_repo/services.py
+    feast_feature_repo___init___py=feast/feature_repo/__init__.py
+    feast_registry_db=feast/registry.db
+    apps_training_requirements_txt=apps/training/requirements.txt

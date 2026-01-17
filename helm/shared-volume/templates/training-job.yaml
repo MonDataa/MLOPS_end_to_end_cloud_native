@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mlops-training
+  namespace: {{ .Release.Namespace }}
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      initContainers:
+        - name: sync-repo
+          image: {{ .Values.images.sync }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while IFS== read -r key path; do
+                mkdir -p /shared/$(dirname "$path")
+                cp /repo/$key /shared/$path
+              done < /repo/manifest
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: repo
+              mountPath: /repo
+      containers:
+        - name: training
+          image: {{ .Values.images.training }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - /app/train.py
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      volumes:
+        - name: shared
+{{- if .Values.sharedVolume.useHostPath }}
+          hostPath:
+            path: {{ .Values.sharedVolume.hostPath }}
+            type: DirectoryOrCreate
+{{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.name }}
+{{- end }}
+        - name: repo
+          configMap:
+            name: mlops-app-repo
+      restartPolicy: Never

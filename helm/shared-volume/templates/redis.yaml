@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlops-redis
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlops-redis
+  template:
+    metadata:
+      labels:
+        app: mlops-redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.images.redis }}
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      volumes:
+        - name: shared
+{{- if .Values.sharedVolume.useHostPath }}
+          hostPath:
+            path: {{ .Values.sharedVolume.hostPath }}
+            type: DirectoryOrCreate
+{{- else }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.name }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-redis
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: mlops-redis
+  ports:
+    - port: 6379
+      targetPort: 6379

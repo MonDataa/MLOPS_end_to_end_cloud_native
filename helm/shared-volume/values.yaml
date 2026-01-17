@@ -1,0 +1,30 @@
+pvc:
+  name: mlops-shared-volume
+  size: 10Gi
+  accessModes:
+    - ReadWriteMany
+  storageClass: ''
+
+sharedVolume:
+  useHostPath: false
+  hostPath:
+
+images:
+  redis: redis:7-alpine
+  python: python:3.11-slim
+  training: mlops-training:latest
+  serving: mlops-serving:latest
+  prometheus: prom/prometheus:v2.50.0
+  grafana: grafana/grafana:10.1.4
+  sync: busybox:1.36.1
+
+resources: {}
+serving:
+  replicas: 1
+  port: 8000
+prometheus:
+  replicas: 1
+  port: 9090
+grafana:
+  replicas: 1
+  port: 3000

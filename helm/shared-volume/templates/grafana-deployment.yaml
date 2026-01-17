@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlops-grafana
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.grafana.replicas }}
+  selector:
+    matchLabels:
+      app: mlops-grafana
+  template:
+    metadata:
+      labels:
+        app: mlops-grafana
+    spec:
+      containers:
+        - name: grafana
+          image: {{ .Values.images.grafana }}
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+          volumeMounts:
+            - name: grafana-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+      volumes:
+        - name: grafana-datasources
+          configMap:
+            name: mlops-grafana-datasources
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-grafana
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: mlops-grafana
+  ports:
+    - protocol: TCP
+      port: {{ .Values.grafana.port }}
+      targetPort: {{ .Values.grafana.port }}

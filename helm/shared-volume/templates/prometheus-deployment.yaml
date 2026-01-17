@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlops-prometheus
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.prometheus.replicas }}
+  selector:
+    matchLabels:
+      app: mlops-prometheus
+  template:
+    metadata:
+      labels:
+        app: mlops-prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: {{ .Values.images.prometheus }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+          ports:
+            - containerPort: {{ .Values.prometheus.port }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: storage
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: mlops-prometheus-config
+        - name: storage
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-prometheus
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: mlops-prometheus
+  ports:
+    - protocol: TCP
+      port: {{ .Values.prometheus.port }}
+      targetPort: {{ .Values.prometheus.port }}
