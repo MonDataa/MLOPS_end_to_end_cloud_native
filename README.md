@@ -4,12 +4,13 @@
 
 This repository orchestrates a local Kubernetes (minikube) MLOps blueprint that relies on one shared PVC mounted at `/shared` across ingestion, feature, training, serving, and monitoring workloads. The flow is:
 
-1. **Ingestion** writes raw CSVs to `/shared/data/raw` and versioning is enforced via DVC.
-2. **Feature engineering** consumes raw files and emits featurized Parquet files under `/shared/data/features`.
-3. **Feast** ingests features from the filesystem for offline access and mirrors them into Redis as the online store.
-4. **Linear regression training** loads the offline features via Feast, derives a NumPy-based model, logs experiments in MLflow under `/shared/mlruns`, and registers the artifacts.
-5. **Serving (WSGI)** pulls the latest production MLflow model, resolves feature values via Feast online store, and exposes Prometheus counters directly from the lightweight WSGI handler.
-6. **Helm chart** defines the PVC, Kubernetes jobs, and deployments so every component mounts the same volume.
+1. **Ingestion** appends events to the Delta Lake bronze table at `/shared/lake/bronze/events`.
+2. **Feature engineering** reads bronze, overwrites the Delta Lake gold table at `/shared/lake/gold/user_features`, then exports an explicit Parquet snapshot at `/shared/lake/exports/feast/user_features.parquet` for Feast's file offline store.
+3. **Feast** applies the feature definitions, materializes the export into Redis, and exposes online features to serving.
+4. **Linear regression training** reads the Delta gold table, logs the Delta table version and metrics, and registers the model in MLflow. MLflow metadata uses SQLite at `/shared/mlflow/mlflow.db`; artifacts are stored at `/shared/mlartifacts`.
+5. **Serving (WSGI)** pulls the production MLflow model, resolves features through Feast/Redis, and exposes health, request, error, fallback, and latency metrics.
+6. **Monitoring** uses a Pushgateway for short-lived jobs, Prometheus for scraping, and a provisioned Grafana `MLOps Overview` dashboard.
+7. **Helm chart** defines the PVC, Kubernetes jobs, deployments, Pushgateway, Prometheus, and Grafana so every component mounts the same volume.
 
 ## Prerequisites
 
@@ -18,27 +19,28 @@ This repository orchestrates a local Kubernetes (minikube) MLOps blueprint that 
 
 ## Step-by-step commands
 
-1. `make up` – starts minikube, ensures the metrics server, and deploys the Helm chart that creates the shared PVC, Redis, and placeholders for the workloads. When you run Helm manually, prefix the chart directory with `./` (for example `helm upgrade --install mlops-shared-volume ./helm/shared-volume`) so Helm treats it as a local chart instead of trying to resolve a repo named `helm`.
-2. `make ingest` – runs the ingestion job that generates synthetic CSVs into `/shared/data/raw`.
-3. `make features` – executes the feature job to materialize `/shared/data/features` and registers them with Feast.
-4. `make train` – schedules the training job that generates its own NumPy/pandas dataset, fits the linear regression locally, logs metrics to MLflow, and writes the serialized `mlflow` model under `/shared/mlruns` on the PVC. Rebuild the training container after editing the code or requirements so Minikube sees the latest version (the job sets `imagePullPolicy: IfNotPresent`):
+1. `make up` – starts Minikube, ensures the metrics server, and deploys the shared PVC, Redis, Pushgateway, Prometheus, and Grafana. When you run Helm manually, prefix the chart directory with `./` (for example `helm upgrade --install mlops-shared-volume ./helm/shared-volume`) so Helm treats it as a local chart instead of trying to resolve a repo named `helm`.
+2. `make build-images` – builds and loads the training and serving images into Minikube.
+3. `make ingest` – appends synthetic events to the bronze Delta table.
+4. `make features` – creates the gold Delta table, validates the basic null-rate metric, exports the Feast snapshot, and materializes Redis.
+5. `make train` – trains from the gold Delta table and registers the model with its Delta version in MLflow.
+6. `make serve` – deploys the WSGI service with `/predict`, `/healthz`, and `/metrics`.
 
 ```sh
-docker build -t mlops-training:latest apps/training
-minikube image load mlops-training:latest
+make build-images
 ```
 
-Build the serving image once so the lightweight WSGI server does not need to reinstall dependencies on each restart:
+7. Expose the local services and validate them:
 
 ```sh
-docker build -t mlops-serving:latest apps/serving
-minikube image load mlops-serving:latest
+kubectl -n mlops port-forward service/mlops-serving 8080:8080
+curl -X POST http://localhost:8080/predict -H 'Content-Type: application/json' -d '{"user_id":1}'
+kubectl -n mlops port-forward service/mlops-grafana 3000:3000
 ```
 
-5. `make serve` – deploys the serving job that installs the minimal requirements, runs `apps/serving/app.py`, and exposes `/predict` plus `/metrics` from the WSGI app.
-   * Optional: `make ingest` and `make features` still exist to show how raw data feeds Feast/Redis, but the trainer no longer depends on them to produce a model (they can be re-run if you want real Feast materializations).
-6. `curl localhost:8000/predict` – hit the serving endpoint to validate the entire DAG.
-7. `make down` – removes the Helm release and stops minikube.
+Grafana is available at `http://localhost:3000` with `admin` / `admin`; the `MLOps Overview` dashboard is provisioned automatically. Prometheus can be exposed with `kubectl -n mlops port-forward service/mlops-prometheus 9090:9090`.
+
+8. `make down` – removes the Helm release and stops Minikube.
 
 ## Argo CD integration
 
@@ -66,22 +68,23 @@ The `Makefile` now includes `argo-apply`, `argo-sync`, `argo-get`, and `argo-del
 - Check PVC contents: `minikube ssh -- ls /shared`
 - Job logs: `kubectl -n mlops logs job/<name>`
 - Helm resources: `helm -n mlops status $(HELM_RELEASE)`.
-- Feast materialization: use `feast materialize` against the files in `/shared/data/features`.
-- MLflow UI: `mlflow ui --backend-store-uri /shared/mlruns --host 0.0.0.0 --port 5000` inside a pod that mounts the PVC.
+- Delta table version: use `python -c "from deltalake import DeltaTable; print(DeltaTable('/shared/lake/gold/user_features').version())"` in a workload with the PVC mounted.
+- Pipeline metrics: inspect `http://mlops-pushgateway:9091/metrics` from the namespace or query `mlops_job_last_run_success` in Prometheus.
+- MLflow UI: use `mlflow ui --backend-store-uri sqlite:////shared/mlflow/mlflow.db --host 0.0.0.0 --port 5000` inside a pod that mounts the PVC.
 
 ## Limitations
 
 - Minimal synthetic data and NumPy/pandas model; no real dataset or hyperparameter sweep.
-- Training job is a single linear-regression run; no autoscaling or distributed compute.
-- No advanced monitoring besides Prometheus counters exposed through the WSGI endpoint.
-- No backup or multi-zone redundancy for the shared PVC.
+- Delta Lake is local-PVC backed. For multi-node, durable storage, migrate the table paths to S3-compatible object storage such as MinIO.
+- Feast's local file offline store still consumes an exported Parquet snapshot; a Delta-aware offline store is the next production migration step.
+- No Alertmanager, data-drift detector, backup, or multi-zone redundancy is included.
 
 ## Migration path toward a lakehouse
 
-1. Replace `/shared/data/raw` and `/shared/data/features` with a Delta/Parquet lakehouse, introducing storage like MinIO or local S3-compatible service.
-2. Point Feast offline store to the lakehouse tables and use Spark/Arrow connectors for ingestion.
-3. Swap the linear regression job for a fuller training script (Spark, Ray, PyTorch, etc.) that consumes from the lakehouse and persists outputs into a catalog.
-4. Introduce a metadata layer (e.g., Amundsen/Atlas) backed by the lakehouse for lineage and governance.
+1. Move `/shared/lake` to MinIO/S3 and configure Delta Lake credentials through Kubernetes Secrets.
+2. Replace the Feast Parquet export with a Delta-aware offline store or a managed feature platform.
+3. Add Alertmanager plus data-quality/drift checks (for example Great Expectations and Evidently) that publish their results to Prometheus and MLflow.
+4. Swap the linear regression job for a fuller training script (Spark, Ray, PyTorch, etc.) that consumes from the lakehouse and persists outputs into a catalog.
 
 ## Simplified storage option
 

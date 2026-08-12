@@ -1,3 +1,6 @@
 mlflow
 numpy
 pandas
+deltalake
+pyarrow
+prometheus-client

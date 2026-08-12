@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlops-pushgateway
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.pushgateway.replicas }}
+  selector:
+    matchLabels:
+      app: mlops-pushgateway
+  template:
+    metadata:
+      labels:
+        app: mlops-pushgateway
+    spec:
+      containers:
+        - name: pushgateway
+          image: {{ .Values.images.pushgateway }}
+          ports:
+            - containerPort: {{ .Values.pushgateway.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-pushgateway
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: mlops-pushgateway
+  ports:
+    - protocol: TCP
+      port: {{ .Values.pushgateway.port }}
+      targetPort: {{ .Values.pushgateway.port }}

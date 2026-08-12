@@ -5,12 +5,19 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   prometheus.yml: |-
+    global:
+      scrape_interval: 15s
     scrape_configs:
       - job_name: 'mlops-serving'
         metrics_path: /metrics
         static_configs:
           - targets:
               - mlops-serving:{{ .Values.serving.port }}
+      - job_name: 'mlops-pipeline-jobs'
+        honor_labels: true
+        static_configs:
+          - targets:
+              - mlops-pushgateway:{{ .Values.pushgateway.port }}
       - job_name: 'prometheus'
         static_configs:
           - targets:

@@ -28,10 +28,15 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              pip install --no-cache-dir pandas feast && cd /shared && python /shared/apps/features/build_features.py
+              pip install --no-cache-dir pandas deltalake pyarrow 'feast[redis]' prometheus-client && cd /shared && python /shared/apps/features/build_features.py
           volumeMounts:
             - name: shared
               mountPath: /shared
+          env:
+            - name: PYTHONPATH
+              value: /shared
+            - name: PUSHGATEWAY_URL
+              value: http://mlops-pushgateway:{{ .Values.pushgateway.port }}
       restartPolicy: Never
       volumes:
         - name: shared

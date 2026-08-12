@@ -2,16 +2,18 @@ HELM_RELEASE=mlops-shared-volume
 CHART_DIR=helm/shared-volume
 SHARED_PATH=/tmp/mlops-shared
 HELM_SET=--set sharedVolume.useHostPath=true --set sharedVolume.hostPath=$(SHARED_PATH)
+MINIKUBE_MEMORY?=6000mb
+MINIKUBE_CPUS?=2
 
 ARGO_APP=argo/application.yaml
 ARGO_NAMESPACE=argocd
 ARGO_APP_NAME=mlops-shared-volume
 
-.PHONY: up ingest features train serve down images build-images
+.PHONY: up sync-config ingest features train serve down images build-images reset-minikube
 .PHONY: argo-apply argo-sync argo-get argo-delete
 
 up:
-	minikube start --driver=docker --addons metrics-server
+	minikube start --driver=docker --addons metrics-server --memory=$(MINIKUBE_MEMORY) --cpus=$(MINIKUBE_CPUS)
 	minikube ssh -- "sudo mkdir -p $(SHARED_PATH) && sudo chown docker:docker $(SHARED_PATH)"
 	kubectl -n mlops delete job mlops-ingest mlops-features mlops-training --ignore-not-found
 	kubectl -n mlops delete deployment mlops-serving mlops-redis --ignore-not-found
@@ -20,29 +22,42 @@ up:
 images: build-images
 
 build-images:
-	docker build -t mlops-training:latest apps/training
+	docker build -t mlops-training:latest -f apps/training/Dockerfile .
 	minikube image load mlops-training:latest
 	docker build -t mlops-serving:latest -f apps/serving/Dockerfile .
 	minikube image load mlops-serving:latest
 
+sync-config:
+	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/app-config.yaml | kubectl -n mlops apply -f -
+
 ingest:
+	$(MAKE) sync-config
 	kubectl -n mlops delete job mlops-ingest --ignore-not-found
 	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/ingestion-job.yaml | kubectl -n mlops apply -f -
 
 features:
+	$(MAKE) sync-config
 	kubectl -n mlops delete job mlops-features --ignore-not-found
 	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/feature-job.yaml | kubectl -n mlops apply -f -
 
 train:
+	$(MAKE) sync-config
 	kubectl -n mlops delete job mlops-training --ignore-not-found
 	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/training-job.yaml | kubectl -n mlops apply -f -
 
 serve:
-	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/serving-deployment.yaml | kubectl -n mlops apply -f -
+	$(MAKE) sync-config
+	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/prometheus-config.yaml | kubectl -n mlops apply -f -
+	helm template mlops-shared-volume $(CHART_DIR) --namespace mlops $(HELM_SET) --show-only templates/serving-deployment.yaml --show-only templates/serving-service.yaml | kubectl -n mlops apply -f -
+	kubectl -n mlops rollout restart deployment/mlops-prometheus
 
 down:
 	helm -n mlops uninstall $(HELM_RELEASE)
 	minikube stop
+
+reset-minikube:
+	minikube delete
+	minikube start --driver=docker --addons metrics-server --memory=$(MINIKUBE_MEMORY) --cpus=$(MINIKUBE_CPUS)
 
 argo-apply:
 	kubectl apply -n $(ARGO_NAMESPACE) -f $(ARGO_APP)

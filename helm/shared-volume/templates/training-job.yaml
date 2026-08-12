@@ -29,6 +29,9 @@ spec:
           command:
             - python
             - /app/train.py
+          env:
+            - name: PUSHGATEWAY_URL
+              value: http://mlops-pushgateway:{{ .Values.pushgateway.port }}
           volumeMounts:
             - name: shared
               mountPath: /shared

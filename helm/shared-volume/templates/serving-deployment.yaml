@@ -38,11 +38,23 @@ spec:
             - /app/app.py
           env:
             - name: MLFLOW_TRACKING_URI
-              value: file:///shared/mlruns
+              value: sqlite:////shared/mlflow/mlflow.db
             - name: SERVING_PORT
               value: "{{ .Values.serving.port }}"
           ports:
             - containerPort: {{ .Values.serving.port }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.serving.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.serving.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 20
           volumeMounts:
             - name: shared
               mountPath: /shared

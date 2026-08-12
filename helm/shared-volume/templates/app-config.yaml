@@ -20,6 +20,8 @@ data:
 {{ .Files.Get "files/apps/serving/requirements.txt" | indent 4 }}
   apps_monitoring_metrics_py: |-
 {{ .Files.Get "files/apps/monitoring/metrics.py" | indent 4 }}
+  apps_monitoring___init___py: |-
+{{ .Files.Get "files/apps/monitoring/__init__.py" | indent 4 }}
   apps___init___py: |-
 {{ .Files.Get "files/apps/__init__.py" | indent 4 }}
   apps_serving___init___py: |-
@@ -34,8 +36,6 @@ data:
 {{ .Files.Get "files/feast/feature_repo/services.py" | indent 4 }}
   feast_feature_repo___init___py: |-
 {{ .Files.Get "files/feast/feature_repo/__init__.py" | indent 4 }}
-  feast_registry_db: |-
-{{ .Files.Get "files/feast/registry.db" | indent 4 }}
   manifest: |-
     apps_ingestion_ingest_py=apps/ingestion/ingest.py
     apps_features_build_features_py=apps/features/build_features.py
@@ -44,6 +44,7 @@ data:
     apps_serving_app_py=apps/serving/app.py
     apps_serving_requirements_txt=apps/serving/requirements.txt
     apps_monitoring_metrics_py=apps/monitoring/metrics.py
+    apps_monitoring___init___py=apps/monitoring/__init__.py
     apps___init___py=apps/__init__.py
     apps_serving___init___py=apps/serving/__init__.py
     feast_feature_repo_feature_store_yaml=feast/feature_repo/feature_store.yaml
@@ -51,5 +52,4 @@ data:
     feast_feature_repo_feature_views_py=feast/feature_repo/feature_views.py
     feast_feature_repo_services_py=feast/feature_repo/services.py
     feast_feature_repo___init___py=feast/feature_repo/__init__.py
-    feast_registry_db=feast/registry.db
     apps_training_requirements_txt=apps/training/requirements.txt

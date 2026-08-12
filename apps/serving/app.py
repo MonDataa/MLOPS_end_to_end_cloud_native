@@ -1,3 +1,7 @@
+"""WSGI prediction service with Prometheus metrics for serving health."""
+
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -8,21 +12,25 @@ from wsgiref.simple_server import make_server
 import mlflow
 import pandas as pd
 from feast import FeatureStore
-from prometheus_client import Counter, CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
-MLFLOW_URI = 'file:///shared/mlruns'
+
+MLFLOW_URI = os.environ.get('MLFLOW_TRACKING_URI', 'sqlite:////shared/mlflow/mlflow.db')
 MODEL_NAME = 'mlops-production-model'
 SERVER_HOST = '0.0.0.0'
-SERVER_PORT = int(os.environ.get('SERVING_PORT', '8000'))
+SERVER_PORT = int(os.environ.get('SERVING_PORT', '8080'))
 
-REQUESTS = Counter('mlops_predictions_total', 'Total prediction requests')
+PREDICTION_REQUESTS = Counter('mlops_prediction_requests_total', 'Prediction requests received.')
+PREDICTION_ERRORS = Counter('mlops_prediction_errors_total', 'Prediction requests that failed.')
+FEAST_FALLBACKS = Counter('mlops_feature_fallbacks_total', 'Predictions using default features.')
+PREDICTION_LATENCY = Histogram('mlops_prediction_latency_seconds', 'Prediction request latency.')
+
 
 def _repo_has_config(path: str) -> bool:
-    path = os.path.join(path, 'feature_store.yaml')
-    return os.path.isfile(path) and os.path.getsize(path) > 0
+    config_path = os.path.join(path, 'feature_store.yaml')
+    return os.path.isfile(config_path) and os.path.getsize(config_path) > 0
 
-# Prefer the shared host volume, but use the embedded copy until the shared
-# volume has the full repo data.
+
 _shared_repo = os.environ.get('FEATURE_STORE_REPO', '/shared/feast/feature_repo')
 _embedded_repo = os.path.join(os.getcwd(), 'feast', 'feature_repo')
 if _repo_has_config(_shared_repo):
@@ -41,19 +49,16 @@ def find_model_uri(client: mlflow.tracking.MlflowClient) -> str:
     if versions:
         return versions[0].source
 
-    runs = list(
-        client.search_runs(order_by=['attributes.start_time DESC'], max_results=1),
-    )
+    runs = list(client.search_runs(order_by=['attributes.start_time DESC'], max_results=1))
     if not runs:
         raise RuntimeError('No MLflow model available')
-
     return runs[0].info.artifact_uri.rstrip('/') + '/model'
 
 
 def load_model() -> mlflow.pyfunc.PyFuncModel:
     client = mlflow.tracking.MlflowClient()
     model_uri = find_model_uri(client)
-    logging.info('loading model from %s', model_uri)
+    logging.info('Loading model from %s', model_uri)
     return mlflow.pyfunc.load_model(model_uri)
 
 
@@ -72,56 +77,48 @@ def json_response(
 
 
 def _default_features() -> pd.DataFrame:
-    return pd.DataFrame({
-        'event_value_sum': [0.0],
-        'event_value_normalized': [0.0],
-    })
+    return pd.DataFrame({'event_value_sum': [0.0], 'event_value_normalized': [0.0]})
 
 
 def predict(request: dict[str, object]) -> dict[str, object]:
-    REQUESTS.inc()
-    user_id = int(request.get('user_id'))
+    user_id = int(request['user_id'])
     try:
         features = store.get_online_features(
-            feature_refs=[
-                'user_features:event_value_sum',
-                'user_features:event_value_normalized',
-            ],
+            features=['user_features:event_value_sum', 'user_features:event_value_normalized'],
             entity_rows=[{'user_id': user_id}],
         ).to_df()
     except Exception:
-        logging.exception('Feast could not fetch online features for user %s; falling back to defaults', user_id)
+        logging.exception('Feast could not fetch online features for user %s', user_id)
         features = pd.DataFrame()
 
-    if features.empty:
-        logging.warning('No online features found for user %s; using defaults', user_id)
+    if features.empty or features[['event_value_sum', 'event_value_normalized']].isna().any(axis=None):
+        FEAST_FALLBACKS.inc()
+        logging.warning('No complete online features found for user %s; using defaults', user_id)
         prediction_inputs = _default_features()
     else:
         prediction_inputs = features[['event_value_sum', 'event_value_normalized']]
     values = model.predict(prediction_inputs)
-    prediction = float(values[0]) if len(values) else float(values)
-
-    return {'user_id': user_id, 'prediction': prediction}
+    return {'user_id': user_id, 'prediction': float(values[0])}
 
 
 def application(environ, start_response):
     method = environ.get('REQUEST_METHOD', 'GET')
     path = environ.get('PATH_INFO', '/')
 
+    if path == '/healthz' and method == 'GET':
+        return json_response(start_response, HTTPStatus.OK, {'status': 'ok', 'model_loaded': model is not None})
+
     if path == '/predict' and method == 'POST':
-        try:
-            length = int(environ.get('CONTENT_LENGTH', '0') or 0)
-            raw_body = environ['wsgi.input'].read(length) if length else environ['wsgi.input'].read()
-            payload = json.loads(raw_body.decode('utf-8'))
-            response = predict(payload)
-            return json_response(start_response, HTTPStatus.OK, response)
-        except Exception as exc:
-            logging.exception('predict request failed')
-            return json_response(
-                start_response,
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                {'error': str(exc)},
-            )
+        PREDICTION_REQUESTS.inc()
+        with PREDICTION_LATENCY.time():
+            try:
+                length = int(environ.get('CONTENT_LENGTH', '0') or 0)
+                raw_body = environ['wsgi.input'].read(length) if length else environ['wsgi.input'].read()
+                return json_response(start_response, HTTPStatus.OK, predict(json.loads(raw_body.decode('utf-8'))))
+            except Exception as exc:
+                PREDICTION_ERRORS.inc()
+                logging.exception('Prediction request failed')
+                return json_response(start_response, HTTPStatus.INTERNAL_SERVER_ERROR, {'error': str(exc)})
 
     if path == '/metrics' and method == 'GET':
         start_response('200 OK', [('Content-Type', CONTENT_TYPE_LATEST)])
@@ -132,7 +129,7 @@ def application(environ, start_response):
 
 
 def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT) -> None:
-    logging.info('serving on %s:%d', host, port)
+    logging.info('Serving on %s:%d', host, port)
     with make_server(host, port, application) as httpd:
         httpd.serve_forever()
 
@@ -140,10 +137,5 @@ def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT) -> None:
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     mlflow.set_tracking_uri(MLFLOW_URI)
-    try:
-        model = load_model()
-    except Exception as exc:  # keep module importable even if model load fails
-        logging.exception('failed to load model during startup: %s', exc)
-        raise
-
+    model = load_model()
     run_server()
