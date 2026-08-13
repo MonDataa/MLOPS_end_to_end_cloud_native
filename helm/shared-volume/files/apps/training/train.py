@@ -1,19 +1,28 @@
-"""Train and register the model from the Delta Lake gold feature table."""
+"""Train and register a credit-default classifier from Delta Lake gold features."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Any
 
 import mlflow
 import mlflow.pyfunc
-from deltalake import DeltaTable
-from mlflow.exceptions import MlflowException
 import numpy as np
 import pandas as pd
+from deltalake import DeltaTable
+from mlflow.exceptions import MlflowException
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, average_precision_score, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from apps.monitoring.metrics import JobMetrics
 
@@ -21,47 +30,158 @@ from apps.monitoring.metrics import JobMetrics
 MLFLOW_URI = os.environ.get('MLFLOW_TRACKING_URI', 'sqlite:////shared/mlflow/mlflow.db')
 MLFLOW_ARTIFACT_ROOT = os.environ.get('MLFLOW_ARTIFACT_ROOT', 'file:///shared/mlartifacts')
 MODEL_NAME = 'mlops-production-model'
-GOLD_PATH = Path(os.environ.get('GOLD_FEATURES_PATH', '/shared/lake/gold/user_features'))
-FEATURE_COLUMNS = ['event_value_sum', 'event_value_normalized']
-TARGET_COLUMN = 'target'
+GOLD_PATH = Path(os.environ.get('GOLD_FEATURES_PATH', '/shared/lake/gold/credit_risk_features'))
+REPORT_ROOT = Path(os.environ.get('MODEL_REPORT_ROOT', '/shared/model_reports'))
+TARGET_COLUMN = 'defaulted'
+SENSITIVE_COLUMNS = ['gender', 'age_group']
+NUMERIC_FEATURES = [
+    'bureau_score',
+    'open_accounts',
+    'delinquencies_2y',
+    'inquiries_6m',
+    'revolving_utilization',
+    'debt_to_income',
+    'annual_income',
+    'years_employed',
+    'loan_amount',
+    'loan_term_months',
+    'interest_rate',
+    'requested_payment',
+    'loan_to_income',
+    'installment_to_income',
+    'payments_late_12m',
+    'late_payment_rate_12m',
+    'months_since_last_late',
+    'previous_defaults',
+    'credit_history_risk_score',
+]
+CATEGORICAL_FEATURES = ['employment_status', 'housing_status', 'purpose']
+FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
+
+@dataclass
+class CreditDefaultModel(mlflow.pyfunc.PythonModel):
+    pipeline: Pipeline
+    feature_columns: list[str]
+
+    def predict(self, context: Any, model_input: pd.DataFrame) -> np.ndarray:
+        frame = model_input.reindex(columns=self.feature_columns)
+        return self.pipeline.predict_proba(frame)[:, 1]
 
 
 def load_training_data(path: Path = GOLD_PATH) -> tuple[pd.DataFrame, int]:
     if not path.exists():
-        raise FileNotFoundError('No gold Delta table found; run feature engineering first.')
+        raise FileNotFoundError('No credit-risk gold Delta table found; run feature engineering first.')
 
     table = DeltaTable(str(path))
     dataset = table.to_pandas()
-    required_columns = set(FEATURE_COLUMNS + [TARGET_COLUMN])
-    missing_columns = required_columns.difference(dataset.columns)
+    required_columns = set(FEATURE_COLUMNS + SENSITIVE_COLUMNS + [TARGET_COLUMN])
+    missing_columns = sorted(required_columns.difference(dataset.columns))
     if missing_columns:
-        raise ValueError(f'Gold table is missing required columns: {sorted(missing_columns)}')
+        raise ValueError(f'Gold table is missing required columns: {missing_columns}')
 
-    clean_dataset = dataset.dropna(subset=FEATURE_COLUMNS + [TARGET_COLUMN])
-    if len(clean_dataset) < 2:
-        raise ValueError('At least two complete rows are required for training.')
-    return clean_dataset, table.version()
-
-
-def fit_linear_model(features: np.ndarray, targets: np.ndarray) -> Tuple[np.ndarray, float, float]:
-    ones = np.ones((features.shape[0], 1), dtype=np.float32)
-    design_matrix = np.hstack((ones, features))
-    theta = np.linalg.pinv(design_matrix.T @ design_matrix) @ design_matrix.T @ targets
-    bias = float(theta[0])
-    weights = theta[1:]
-    predictions = design_matrix @ theta
-    mse = float(np.mean((predictions - targets) ** 2))
-    return weights, bias, mse
+    dataset = dataset.dropna(subset=FEATURE_COLUMNS + SENSITIVE_COLUMNS + [TARGET_COLUMN]).copy()
+    if dataset[TARGET_COLUMN].nunique() < 2:
+        raise ValueError('Training target must contain both classes.')
+    return dataset, table.version()
 
 
-@dataclass
-class LinearRegressionModel(mlflow.pyfunc.PythonModel):
-    weights: np.ndarray
-    bias: float
+def build_pipeline() -> Pipeline:
+    numeric_pipeline = Pipeline(
+        steps=[
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler()),
+        ]
+    )
+    categorical_pipeline = Pipeline(
+        steps=[
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore')),
+        ]
+    )
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', numeric_pipeline, NUMERIC_FEATURES),
+            ('cat', categorical_pipeline, CATEGORICAL_FEATURES),
+        ]
+    )
+    classifier = LogisticRegression(max_iter=1000, class_weight='balanced', solver='liblinear')
+    return Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
 
-    def predict(self, context, model_input: pd.DataFrame) -> np.ndarray:
-        data = model_input[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-        return (data @ self.weights) + self.bias
+
+def score_model(model: Pipeline, x_test: pd.DataFrame, y_test: pd.Series) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
+    probabilities = model.predict_proba(x_test)[:, 1]
+    predictions = (probabilities >= 0.5).astype(int)
+    metrics = {
+        'roc_auc': float(roc_auc_score(y_test, probabilities)),
+        'average_precision': float(average_precision_score(y_test, probabilities)),
+        'accuracy': float(accuracy_score(y_test, predictions)),
+        'precision': float(precision_score(y_test, predictions, zero_division=0)),
+        'recall': float(recall_score(y_test, predictions, zero_division=0)),
+    }
+    return metrics, probabilities, predictions
+
+
+def group_rates(frame: pd.DataFrame, group_column: str, predictions: np.ndarray) -> dict[str, dict[str, float]]:
+    scored = frame[[group_column, TARGET_COLUMN]].copy()
+    scored['prediction'] = predictions
+    rates: dict[str, dict[str, float]] = {}
+    for group, group_frame in scored.groupby(group_column):
+        positives = group_frame[group_frame[TARGET_COLUMN] == 1]
+        negatives = group_frame[group_frame[TARGET_COLUMN] == 0]
+        rates[str(group)] = {
+            'rows': float(len(group_frame)),
+            'predicted_default_rate': float(group_frame['prediction'].mean()),
+            'true_default_rate': float(group_frame[TARGET_COLUMN].mean()),
+            'true_positive_rate': float(positives['prediction'].mean()) if len(positives) else 0.0,
+            'false_positive_rate': float(negatives['prediction'].mean()) if len(negatives) else 0.0,
+        }
+    return rates
+
+
+def max_difference(rates: dict[str, dict[str, float]], metric_name: str) -> float:
+    values = [group_metrics[metric_name] for group_metrics in rates.values()]
+    return float(max(values) - min(values)) if values else 0.0
+
+
+def build_fairness_report(test_frame: pd.DataFrame, predictions: np.ndarray) -> tuple[dict[str, object], dict[str, float]]:
+    report: dict[str, object] = {}
+    metrics: dict[str, float] = {}
+    for column in SENSITIVE_COLUMNS:
+        rates = group_rates(test_frame, column, predictions)
+        report[column] = rates
+        metrics[f'demographic_parity_{column}_diff'] = max_difference(rates, 'predicted_default_rate')
+        metrics[f'equal_opportunity_{column}_diff'] = max_difference(rates, 'true_positive_rate')
+    return report, metrics
+
+
+def write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+
+
+def write_explainability_report(model: Pipeline, x_test: pd.DataFrame, y_test: pd.Series) -> pd.DataFrame:
+    scoring = 'roc_auc' if y_test.nunique() == 2 else 'accuracy'
+    result = permutation_importance(model, x_test, y_test, n_repeats=10, random_state=42, scoring=scoring)
+    importance = pd.DataFrame(
+        {
+            'feature': FEATURE_COLUMNS,
+            'importance_mean': result.importances_mean,
+            'importance_std': result.importances_std,
+        }
+    ).sort_values('importance_mean', ascending=False)
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    importance.to_csv(REPORT_ROOT / 'permutation_importance.csv', index=False)
+    return importance
+
+
+def feature_defaults(dataset: pd.DataFrame) -> dict[str, object]:
+    defaults: dict[str, object] = {}
+    for column in NUMERIC_FEATURES:
+        defaults[column] = float(dataset[column].median())
+    for column in CATEGORICAL_FEATURES:
+        defaults[column] = str(dataset[column].mode(dropna=True).iloc[0])
+    return defaults
 
 
 def ensure_registered_model(client: mlflow.tracking.MlflowClient) -> None:
@@ -75,8 +195,8 @@ def ensure_registered_model(client: mlflow.tracking.MlflowClient) -> None:
 
 
 def ensure_experiment(client: mlflow.tracking.MlflowClient) -> None:
-    if client.get_experiment_by_name('mlops-linear') is None:
-        client.create_experiment('mlops-linear', artifact_location=MLFLOW_ARTIFACT_ROOT)
+    if client.get_experiment_by_name('credit-risk') is None:
+        client.create_experiment('credit-risk', artifact_location=MLFLOW_ARTIFACT_ROOT)
 
 
 def main() -> None:
@@ -84,30 +204,66 @@ def main() -> None:
     metrics = JobMetrics('training')
     Path('/shared/mlflow').mkdir(parents=True, exist_ok=True)
     Path('/shared/mlartifacts').mkdir(parents=True, exist_ok=True)
+    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(MLFLOW_URI)
 
     try:
         dataset, gold_version = load_training_data()
-        features = dataset[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-        targets = dataset[TARGET_COLUMN].to_numpy(dtype=np.float32)
-        weights, bias, mse_loss = fit_linear_model(features, targets)
+        x_train, x_test, y_train, y_test = train_test_split(
+            dataset[FEATURE_COLUMNS + SENSITIVE_COLUMNS],
+            dataset[TARGET_COLUMN].astype(int),
+            test_size=0.30,
+            random_state=42,
+            stratify=dataset[TARGET_COLUMN],
+        )
+
+        model = build_pipeline()
+        model.fit(x_train[FEATURE_COLUMNS], y_train)
+        model_metrics, probabilities, predictions = score_model(model, x_test[FEATURE_COLUMNS], y_test)
+        test_frame = x_test.copy()
+        test_frame[TARGET_COLUMN] = y_test.to_numpy()
+        fairness_report, fairness_metrics = build_fairness_report(test_frame, predictions)
+        importance = write_explainability_report(model, x_test[FEATURE_COLUMNS], y_test)
+
+        report_payload = {
+            'use_case': 'credit_default_risk',
+            'target': TARGET_COLUMN,
+            'sensitive_attributes': SENSITIVE_COLUMNS,
+            'model_features': FEATURE_COLUMNS,
+            'metrics': model_metrics,
+            'fairness': fairness_report,
+            'delta_gold_version': gold_version,
+            'train_rows': int(len(x_train)),
+            'test_rows': int(len(x_test)),
+        }
+        write_json(REPORT_ROOT / 'fairness_report.json', fairness_report)
+        write_json(REPORT_ROOT / 'model_card.json', report_payload)
+        write_json(REPORT_ROOT / 'feature_defaults.json', feature_defaults(dataset))
 
         client = mlflow.tracking.MlflowClient()
         ensure_registered_model(client)
         ensure_experiment(client)
-        mlflow.set_experiment('mlops-linear')
-        with mlflow.start_run(run_name='delta-gold-linear-regression'):
-            mlflow.log_params({
-                'features': ','.join(FEATURE_COLUMNS),
-                'target': TARGET_COLUMN,
-                'delta_table_path': str(GOLD_PATH),
-                'delta_table_version': gold_version,
-            })
-            mlflow.log_metric('mse_loss', mse_loss)
-            mlflow.log_metric('training_rows', len(dataset))
+        mlflow.set_experiment('credit-risk')
+        with mlflow.start_run(run_name='credit-default-logistic-regression'):
+            mlflow.log_params(
+                {
+                    'model_type': 'sklearn.LogisticRegression',
+                    'features': ','.join(FEATURE_COLUMNS),
+                    'excluded_sensitive_features': ','.join(SENSITIVE_COLUMNS),
+                    'target': TARGET_COLUMN,
+                    'delta_table_path': str(GOLD_PATH),
+                    'delta_table_version': gold_version,
+                }
+            )
+            mlflow.log_metrics(model_metrics | fairness_metrics)
+            mlflow.log_metric('training_rows', len(x_train))
+            mlflow.log_metric('test_rows', len(x_test))
+            mlflow.log_artifact(str(REPORT_ROOT / 'fairness_report.json'), artifact_path='governance')
+            mlflow.log_artifact(str(REPORT_ROOT / 'model_card.json'), artifact_path='governance')
+            mlflow.log_artifact(str(REPORT_ROOT / 'permutation_importance.csv'), artifact_path='explainability')
             mlflow.pyfunc.log_model(
                 artifact_path='model',
-                python_model=LinearRegressionModel(weights, bias),
+                python_model=CreditDefaultModel(model, FEATURE_COLUMNS),
                 registered_model_name=MODEL_NAME,
             )
 
@@ -121,16 +277,24 @@ def main() -> None:
             stage='Production',
             archive_existing_versions=True,
         )
+
         logging.info(
-            'Registered model version %s from Delta version %d with mse=%s',
+            'Registered credit-risk model version %s from Delta version %d with roc_auc=%s and top_feature=%s',
             latest_version.version,
             gold_version,
-            mse_loss,
+            model_metrics['roc_auc'],
+            importance.iloc[0]['feature'],
         )
         metrics.publish(
             success=True,
             rows=len(dataset),
-            custom_metrics={'gold_delta_version': gold_version, 'mse_loss': mse_loss},
+            custom_metrics={
+                'gold_delta_version': gold_version,
+                'roc_auc': model_metrics['roc_auc'],
+                'average_precision': model_metrics['average_precision'],
+                'demographic_parity_gender_diff': fairness_metrics['demographic_parity_gender_diff'],
+                'equal_opportunity_gender_diff': fairness_metrics['equal_opportunity_gender_diff'],
+            },
         )
     except Exception:
         metrics.publish(success=False)

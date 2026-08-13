@@ -1,4 +1,6 @@
 mlflow
 feast
+pandas
 prometheus-client
 redis
+scikit-learn

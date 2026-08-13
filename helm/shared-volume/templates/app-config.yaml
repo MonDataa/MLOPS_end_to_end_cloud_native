@@ -22,6 +22,14 @@ data:
 {{ .Files.Get "files/apps/monitoring/metrics.py" | indent 4 }}
   apps_monitoring___init___py: |-
 {{ .Files.Get "files/apps/monitoring/__init__.py" | indent 4 }}
+  data_raw_customers_csv: |-
+{{ .Files.Get "files/data/raw/customers.csv" | indent 4 }}
+  data_raw_loan_applications_csv: |-
+{{ .Files.Get "files/data/raw/loan_applications.csv" | indent 4 }}
+  data_raw_credit_bureau_csv: |-
+{{ .Files.Get "files/data/raw/credit_bureau.csv" | indent 4 }}
+  data_raw_repayment_history_csv: |-
+{{ .Files.Get "files/data/raw/repayment_history.csv" | indent 4 }}
   apps___init___py: |-
 {{ .Files.Get "files/apps/__init__.py" | indent 4 }}
   apps_serving___init___py: |-
@@ -45,6 +53,10 @@ data:
     apps_serving_requirements_txt=apps/serving/requirements.txt
     apps_monitoring_metrics_py=apps/monitoring/metrics.py
     apps_monitoring___init___py=apps/monitoring/__init__.py
+    data_raw_customers_csv=data/raw/customers.csv
+    data_raw_loan_applications_csv=data/raw/loan_applications.csv
+    data_raw_credit_bureau_csv=data/raw/credit_bureau.csv
+    data_raw_repayment_history_csv=data/raw/repayment_history.csv
     apps___init___py=apps/__init__.py
     apps_serving___init___py=apps/serving/__init__.py
     feast_feature_repo_feature_store_yaml=feast/feature_repo/feature_store.yaml

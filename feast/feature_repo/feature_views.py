@@ -1,24 +1,49 @@
 from datetime import timedelta
-from feast import FeatureView, FileSource, Field
-from feast.types import Float64
-from entities import user
 
-FEATURE_PATH = '/shared/lake/exports/feast/user_features.parquet'
+from feast import FeatureView, Field, FileSource
+from feast.types import Float64, Int64, String
 
-user_features_source = FileSource(
+from entities import customer
+
+
+FEATURE_PATH = '/shared/lake/exports/feast/credit_risk_features.parquet'
+
+credit_risk_source = FileSource(
     path=FEATURE_PATH,
-    event_timestamp_column='event_time',
+    event_timestamp_column='event_timestamp',
 )
 
-user_feature_view = FeatureView(
-    name='user_features',
-    entities=[user],
-    ttl=timedelta(days=1),
+credit_risk_feature_view = FeatureView(
+    name='credit_risk_features',
+    entities=[customer],
+    ttl=timedelta(days=30),
     schema=[
-        Field(name='event_value_sum', dtype=Float64),
-        Field(name='event_value_normalized', dtype=Float64),
-        Field(name='event_value_mean', dtype=Float64),
+        Field(name='application_id', dtype=Int64),
+        Field(name='bureau_score', dtype=Float64),
+        Field(name='open_accounts', dtype=Int64),
+        Field(name='delinquencies_2y', dtype=Int64),
+        Field(name='inquiries_6m', dtype=Int64),
+        Field(name='revolving_utilization', dtype=Float64),
+        Field(name='debt_to_income', dtype=Float64),
+        Field(name='annual_income', dtype=Float64),
+        Field(name='years_employed', dtype=Float64),
+        Field(name='loan_amount', dtype=Float64),
+        Field(name='loan_term_months', dtype=Int64),
+        Field(name='interest_rate', dtype=Float64),
+        Field(name='requested_payment', dtype=Float64),
+        Field(name='loan_to_income', dtype=Float64),
+        Field(name='installment_to_income', dtype=Float64),
+        Field(name='payments_late_12m', dtype=Int64),
+        Field(name='late_payment_rate_12m', dtype=Float64),
+        Field(name='months_since_last_late', dtype=Int64),
+        Field(name='previous_defaults', dtype=Int64),
+        Field(name='credit_history_risk_score', dtype=Float64),
+        Field(name='employment_status', dtype=String),
+        Field(name='housing_status', dtype=String),
+        Field(name='purpose', dtype=String),
+        Field(name='gender', dtype=String),
+        Field(name='age_group', dtype=String),
     ],
     online=True,
-    source=user_features_source,
+    source=credit_risk_source,
 )

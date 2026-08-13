@@ -1,4 +1,4 @@
-"""WSGI prediction service with Prometheus metrics for serving health."""
+"""WSGI credit-risk prediction service with Prometheus metrics and explanations."""
 
 from __future__ import annotations
 
@@ -6,19 +6,46 @@ import json
 import logging
 import os
 from http import HTTPStatus
+from pathlib import Path
 from typing import Iterable, Optional
 from wsgiref.simple_server import make_server
 
 import mlflow
 import pandas as pd
 from feast import FeatureStore
-from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 
 MLFLOW_URI = os.environ.get('MLFLOW_TRACKING_URI', 'sqlite:////shared/mlflow/mlflow.db')
 MODEL_NAME = 'mlops-production-model'
 SERVER_HOST = '0.0.0.0'
 SERVER_PORT = int(os.environ.get('SERVING_PORT', '8080'))
+REPORT_ROOT = Path(os.environ.get('MODEL_REPORT_ROOT', '/shared/model_reports'))
+
+FEATURE_COLUMNS = [
+    'bureau_score',
+    'open_accounts',
+    'delinquencies_2y',
+    'inquiries_6m',
+    'revolving_utilization',
+    'debt_to_income',
+    'annual_income',
+    'years_employed',
+    'loan_amount',
+    'loan_term_months',
+    'interest_rate',
+    'requested_payment',
+    'loan_to_income',
+    'installment_to_income',
+    'payments_late_12m',
+    'late_payment_rate_12m',
+    'months_since_last_late',
+    'previous_defaults',
+    'credit_history_risk_score',
+    'employment_status',
+    'housing_status',
+    'purpose',
+]
 
 PREDICTION_REQUESTS = Counter('mlops_prediction_requests_total', 'Prediction requests received.')
 PREDICTION_ERRORS = Counter('mlops_prediction_errors_total', 'Prediction requests that failed.')
@@ -42,6 +69,9 @@ else:
 
 store = FeatureStore(repo_path=FEATURE_STORE_REPO)
 model = None
+feature_defaults: dict[str, object] = {}
+feature_importance: list[dict[str, object]] = []
+fairness_report: dict[str, object] = {}
 
 
 def find_model_uri(client: mlflow.tracking.MlflowClient) -> str:
@@ -62,6 +92,24 @@ def load_model() -> mlflow.pyfunc.PyFuncModel:
     return mlflow.pyfunc.load_model(model_uri)
 
 
+def load_json(path: Path, default):
+    if not path.exists():
+        logging.warning('Report file %s not found; using default payload', path)
+        return default
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def load_reports() -> None:
+    global feature_defaults, feature_importance, fairness_report
+    feature_defaults = load_json(REPORT_ROOT / 'feature_defaults.json', {})
+    fairness_report = load_json(REPORT_ROOT / 'fairness_report.json', {})
+    importance_path = REPORT_ROOT / 'permutation_importance.csv'
+    if importance_path.exists():
+        feature_importance = pd.read_csv(importance_path).to_dict(orient='records')
+    else:
+        feature_importance = []
+
+
 def json_response(
     start_response,
     status: HTTPStatus,
@@ -76,29 +124,78 @@ def json_response(
     return [body]
 
 
-def _default_features() -> pd.DataFrame:
-    return pd.DataFrame({'event_value_sum': [0.0], 'event_value_normalized': [0.0]})
+def fetch_features(customer_id: int) -> tuple[pd.DataFrame, bool]:
+    feature_refs = [f'credit_risk_features:{column}' for column in FEATURE_COLUMNS]
+    try:
+        online_features = store.get_online_features(
+            features=feature_refs,
+            entity_rows=[{'customer_id': customer_id}],
+        ).to_df()
+    except Exception:
+        logging.exception('Feast could not fetch online features for customer %s', customer_id)
+        online_features = pd.DataFrame()
+
+    if online_features.empty:
+        return pd.DataFrame([feature_defaults]).reindex(columns=FEATURE_COLUMNS), True
+
+    features = online_features.reindex(columns=FEATURE_COLUMNS)
+    used_defaults = False
+    for column in FEATURE_COLUMNS:
+        if column not in features or pd.isna(features.at[0, column]):
+            features.at[0, column] = feature_defaults.get(column)
+            used_defaults = True
+    return features, used_defaults
+
+
+def risk_band(probability: float) -> str:
+    if probability >= 0.70:
+        return 'high'
+    if probability >= 0.40:
+        return 'medium'
+    return 'low'
+
+
+def json_safe_value(value):
+    if pd.isna(value):
+        return None
+    if hasattr(value, 'item'):
+        return value.item()
+    return value
+
+
+def top_reason_codes(features: pd.DataFrame, limit: int = 5) -> list[dict[str, object]]:
+    if not feature_importance:
+        return []
+
+    reasons = []
+    row = features.iloc[0].to_dict()
+    for item in feature_importance[:limit]:
+        feature = str(item['feature'])
+        reasons.append(
+                {
+                    'feature': feature,
+                    'importance': float(item['importance_mean']),
+                    'value': json_safe_value(row.get(feature)),
+                }
+            )
+    return reasons
 
 
 def predict(request: dict[str, object]) -> dict[str, object]:
-    user_id = int(request['user_id'])
-    try:
-        features = store.get_online_features(
-            features=['user_features:event_value_sum', 'user_features:event_value_normalized'],
-            entity_rows=[{'user_id': user_id}],
-        ).to_df()
-    except Exception:
-        logging.exception('Feast could not fetch online features for user %s', user_id)
-        features = pd.DataFrame()
-
-    if features.empty or features[['event_value_sum', 'event_value_normalized']].isna().any(axis=None):
+    customer_id = int(request['customer_id'])
+    features, used_defaults = fetch_features(customer_id)
+    if used_defaults:
         FEAST_FALLBACKS.inc()
-        logging.warning('No complete online features found for user %s; using defaults', user_id)
-        prediction_inputs = _default_features()
-    else:
-        prediction_inputs = features[['event_value_sum', 'event_value_normalized']]
-    values = model.predict(prediction_inputs)
-    return {'user_id': user_id, 'prediction': float(values[0])}
+        logging.warning('Incomplete online features for customer %s; defaults were used', customer_id)
+
+    probability = float(model.predict(features)[0])
+    return {
+        'customer_id': customer_id,
+        'default_probability': probability,
+        'risk_band': risk_band(probability),
+        'used_feature_defaults': used_defaults,
+        'top_reason_codes': top_reason_codes(features),
+    }
 
 
 def application(environ, start_response):
@@ -106,9 +203,16 @@ def application(environ, start_response):
     path = environ.get('PATH_INFO', '/')
 
     if path == '/healthz' and method == 'GET':
-        return json_response(start_response, HTTPStatus.OK, {'status': 'ok', 'model_loaded': model is not None})
+        return json_response(
+            start_response,
+            HTTPStatus.OK,
+            {'status': 'ok', 'model_loaded': model is not None, 'use_case': 'credit_default_risk'},
+        )
 
-    if path == '/predict' and method == 'POST':
+    if path == '/fairness' and method == 'GET':
+        return json_response(start_response, HTTPStatus.OK, fairness_report)
+
+    if path in {'/predict', '/explain'} and method == 'POST':
         PREDICTION_REQUESTS.inc()
         with PREDICTION_LATENCY.time():
             try:
@@ -137,5 +241,6 @@ def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT) -> None:
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     mlflow.set_tracking_uri(MLFLOW_URI)
+    load_reports()
     model = load_model()
     run_server()

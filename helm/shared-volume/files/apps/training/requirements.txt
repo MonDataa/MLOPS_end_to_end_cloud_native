@@ -1,6 +1,7 @@
 mlflow
 numpy
 pandas
+scikit-learn
 deltalake
 pyarrow
 prometheus-client
