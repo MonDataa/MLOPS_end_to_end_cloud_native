@@ -5,19 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import mlflow
-import mlflow.pyfunc
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
+import shap
 from deltalake import DeltaTable
 from mlflow.exceptions import MlflowException
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, average_precision_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
@@ -32,6 +30,8 @@ MLFLOW_ARTIFACT_ROOT = os.environ.get('MLFLOW_ARTIFACT_ROOT', 'file:///shared/ml
 MODEL_NAME = 'mlops-production-model'
 GOLD_PATH = Path(os.environ.get('GOLD_FEATURES_PATH', '/shared/lake/gold/credit_risk_features'))
 REPORT_ROOT = Path(os.environ.get('MODEL_REPORT_ROOT', '/shared/model_reports'))
+SHAP_BACKGROUND_PATH = REPORT_ROOT / 'shap_background.parquet'
+SHAP_SUMMARY_PATH = REPORT_ROOT / 'shap_summary.csv'
 TARGET_COLUMN = 'defaulted'
 SENSITIVE_COLUMNS = ['gender', 'age_group']
 NUMERIC_FEATURES = [
@@ -57,16 +57,6 @@ NUMERIC_FEATURES = [
 ]
 CATEGORICAL_FEATURES = ['employment_status', 'housing_status', 'purpose']
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
-
-
-@dataclass
-class CreditDefaultModel(mlflow.pyfunc.PythonModel):
-    pipeline: Pipeline
-    feature_columns: list[str]
-
-    def predict(self, context: Any, model_input: pd.DataFrame) -> np.ndarray:
-        frame = model_input.reindex(columns=self.feature_columns)
-        return self.pipeline.predict_proba(frame)[:, 1]
 
 
 def load_training_data(path: Path = GOLD_PATH) -> tuple[pd.DataFrame, int]:
@@ -109,6 +99,19 @@ def build_pipeline() -> Pipeline:
     return Pipeline(steps=[('preprocessor', preprocessor), ('classifier', classifier)])
 
 
+def to_dense_matrix(matrix):
+    return matrix.toarray() if hasattr(matrix, 'toarray') else np.asarray(matrix)
+
+
+def normalized_shap_feature_name(transformed_name: str) -> str:
+    base_name = transformed_name.split('__', 1)[1] if '__' in transformed_name else transformed_name
+    for column in CATEGORICAL_FEATURES:
+        prefix = f'{column}_'
+        if base_name.startswith(prefix):
+            return column
+    return base_name
+
+
 def score_model(model: Pipeline, x_test: pd.DataFrame, y_test: pd.Series) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
     probabilities = model.predict_proba(x_test)[:, 1]
     predictions = (probabilities >= 0.5).astype(int)
@@ -120,6 +123,36 @@ def score_model(model: Pipeline, x_test: pd.DataFrame, y_test: pd.Series) -> tup
         'recall': float(recall_score(y_test, predictions, zero_division=0)),
     }
     return metrics, probabilities, predictions
+
+
+def build_shap_reports(model: Pipeline, x_train: pd.DataFrame, x_test: pd.DataFrame) -> pd.DataFrame:
+    background = x_train[FEATURE_COLUMNS].sample(n=min(20, len(x_train)), random_state=42).copy()
+    background.to_parquet(SHAP_BACKGROUND_PATH, index=False)
+
+    preprocessor = model.named_steps['preprocessor']
+    classifier = model.named_steps['classifier']
+    feature_names = list(preprocessor.get_feature_names_out())
+
+    background_matrix = to_dense_matrix(preprocessor.transform(background))
+    test_matrix = to_dense_matrix(preprocessor.transform(x_test[FEATURE_COLUMNS]))
+    explainer = shap.LinearExplainer(classifier, background_matrix)
+    shap_values = explainer.shap_values(test_matrix)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    shap_values = np.asarray(shap_values)
+
+    summary = pd.DataFrame(
+        {
+            'feature_name': feature_names,
+            'raw_feature': [normalized_shap_feature_name(name) for name in feature_names],
+            'mean_abs_shap': np.abs(shap_values).mean(axis=0),
+            'mean_shap': shap_values.mean(axis=0),
+        }
+    ).sort_values('mean_abs_shap', ascending=False)
+    summary['mean_abs_shap_pct'] = summary['mean_abs_shap'] / summary['mean_abs_shap'].sum()
+    SHAP_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(SHAP_SUMMARY_PATH, index=False)
+    return summary
 
 
 def group_rates(frame: pd.DataFrame, group_column: str, predictions: np.ndarray) -> dict[str, dict[str, float]]:
@@ -161,18 +194,12 @@ def write_json(path: Path, payload: object) -> None:
 
 
 def write_explainability_report(model: Pipeline, x_test: pd.DataFrame, y_test: pd.Series) -> pd.DataFrame:
-    scoring = 'roc_auc' if y_test.nunique() == 2 else 'accuracy'
-    result = permutation_importance(model, x_test, y_test, n_repeats=10, random_state=42, scoring=scoring)
-    importance = pd.DataFrame(
-        {
-            'feature': FEATURE_COLUMNS,
-            'importance_mean': result.importances_mean,
-            'importance_std': result.importances_std,
-        }
-    ).sort_values('importance_mean', ascending=False)
-    REPORT_ROOT.mkdir(parents=True, exist_ok=True)
-    importance.to_csv(REPORT_ROOT / 'permutation_importance.csv', index=False)
-    return importance
+    del model
+    del x_test
+    del y_test
+    if not SHAP_SUMMARY_PATH.exists():
+        raise FileNotFoundError(f'Missing SHAP summary at {SHAP_SUMMARY_PATH}')
+    return pd.read_csv(SHAP_SUMMARY_PATH)
 
 
 def feature_defaults(dataset: pd.DataFrame) -> dict[str, object]:
@@ -223,7 +250,7 @@ def main() -> None:
         test_frame = x_test.copy()
         test_frame[TARGET_COLUMN] = y_test.to_numpy()
         fairness_report, fairness_metrics = build_fairness_report(test_frame, predictions)
-        importance = write_explainability_report(model, x_test[FEATURE_COLUMNS], y_test)
+        shap_summary = build_shap_reports(model, x_train, x_test)
 
         report_payload = {
             'use_case': 'credit_default_risk',
@@ -232,6 +259,7 @@ def main() -> None:
             'model_features': FEATURE_COLUMNS,
             'metrics': model_metrics,
             'fairness': fairness_report,
+            'shap_top_feature': str(shap_summary.iloc[0]['raw_feature']),
             'delta_gold_version': gold_version,
             'train_rows': int(len(x_train)),
             'test_rows': int(len(x_test)),
@@ -260,10 +288,12 @@ def main() -> None:
             mlflow.log_metric('test_rows', len(x_test))
             mlflow.log_artifact(str(REPORT_ROOT / 'fairness_report.json'), artifact_path='governance')
             mlflow.log_artifact(str(REPORT_ROOT / 'model_card.json'), artifact_path='governance')
-            mlflow.log_artifact(str(REPORT_ROOT / 'permutation_importance.csv'), artifact_path='explainability')
-            mlflow.pyfunc.log_model(
-                artifact_path='model',
-                python_model=CreditDefaultModel(model, FEATURE_COLUMNS),
+            mlflow.log_artifact(str(SHAP_BACKGROUND_PATH), artifact_path='explainability')
+            mlflow.log_artifact(str(SHAP_SUMMARY_PATH), artifact_path='explainability')
+            mlflow.sklearn.log_model(
+                sk_model=model,
+                name='model',
+                serialization_format='cloudpickle',
                 registered_model_name=MODEL_NAME,
             )
 
@@ -283,7 +313,7 @@ def main() -> None:
             latest_version.version,
             gold_version,
             model_metrics['roc_auc'],
-            importance.iloc[0]['feature'],
+            shap_summary.iloc[0]['raw_feature'],
         )
         metrics.publish(
             success=True,

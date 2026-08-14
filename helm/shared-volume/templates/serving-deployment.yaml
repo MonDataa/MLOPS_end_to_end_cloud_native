@@ -33,14 +33,17 @@ spec:
         - name: serving
           image: {{ .Values.images.serving }}
           imagePullPolicy: IfNotPresent
-          command:
-            - python
-            - /app/app.py
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir shap && python /shared/apps/serving/app.py
           env:
             - name: MLFLOW_TRACKING_URI
               value: sqlite:////shared/mlflow/mlflow.db
             - name: SERVING_PORT
               value: "{{ .Values.serving.port }}"
+            - name: PYTHONPATH
+              value: /shared
           ports:
             - containerPort: {{ .Values.serving.port }}
           readinessProbe:

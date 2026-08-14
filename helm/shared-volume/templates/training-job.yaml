@@ -26,12 +26,15 @@ spec:
         - name: training
           image: {{ .Values.images.training }}
           imagePullPolicy: IfNotPresent
-          command:
-            - python
-            - /app/train.py
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir shap && python /shared/apps/training/train.py
           env:
             - name: PUSHGATEWAY_URL
               value: http://mlops-pushgateway:{{ .Values.pushgateway.port }}
+            - name: PYTHONPATH
+              value: /shared
           volumeMounts:
             - name: shared
               mountPath: /shared

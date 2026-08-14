@@ -11,7 +11,10 @@ from typing import Iterable, Optional
 from wsgiref.simple_server import make_server
 
 import mlflow
+import mlflow.sklearn
+import numpy as np
 import pandas as pd
+import shap
 from feast import FeatureStore
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
@@ -21,6 +24,8 @@ MODEL_NAME = 'mlops-production-model'
 SERVER_HOST = '0.0.0.0'
 SERVER_PORT = int(os.environ.get('SERVING_PORT', '8080'))
 REPORT_ROOT = Path(os.environ.get('MODEL_REPORT_ROOT', '/shared/model_reports'))
+SHAP_BACKGROUND_PATH = REPORT_ROOT / 'shap_background.parquet'
+SHAP_SUMMARY_PATH = REPORT_ROOT / 'shap_summary.csv'
 
 FEATURE_COLUMNS = [
     'bureau_score',
@@ -47,6 +52,8 @@ FEATURE_COLUMNS = [
     'purpose',
 ]
 
+CATEGORICAL_FEATURES = ['employment_status', 'housing_status', 'purpose']
+
 PREDICTION_REQUESTS = Counter('mlops_prediction_requests_total', 'Prediction requests received.')
 PREDICTION_ERRORS = Counter('mlops_prediction_errors_total', 'Prediction requests that failed.')
 FEAST_FALLBACKS = Counter('mlops_feature_fallbacks_total', 'Predictions using default features.')
@@ -70,8 +77,10 @@ else:
 store = FeatureStore(repo_path=FEATURE_STORE_REPO)
 model = None
 feature_defaults: dict[str, object] = {}
-feature_importance: list[dict[str, object]] = []
+shap_summary: pd.DataFrame = pd.DataFrame()
 fairness_report: dict[str, object] = {}
+shap_explainer = None
+shap_feature_names: list[str] = []
 
 
 def find_model_uri(client: mlflow.tracking.MlflowClient) -> str:
@@ -89,7 +98,7 @@ def load_model() -> mlflow.pyfunc.PyFuncModel:
     client = mlflow.tracking.MlflowClient()
     model_uri = find_model_uri(client)
     logging.info('Loading model from %s', model_uri)
-    return mlflow.pyfunc.load_model(model_uri)
+    return mlflow.sklearn.load_model(model_uri)
 
 
 def load_json(path: Path, default):
@@ -100,14 +109,51 @@ def load_json(path: Path, default):
 
 
 def load_reports() -> None:
-    global feature_defaults, feature_importance, fairness_report
+    global feature_defaults, shap_summary, fairness_report
     feature_defaults = load_json(REPORT_ROOT / 'feature_defaults.json', {})
     fairness_report = load_json(REPORT_ROOT / 'fairness_report.json', {})
-    importance_path = REPORT_ROOT / 'permutation_importance.csv'
-    if importance_path.exists():
-        feature_importance = pd.read_csv(importance_path).to_dict(orient='records')
+    if SHAP_SUMMARY_PATH.exists():
+        shap_summary = pd.read_csv(SHAP_SUMMARY_PATH)
     else:
-        feature_importance = []
+        shap_summary = pd.DataFrame()
+
+
+def to_dense_matrix(matrix):
+    return matrix.toarray() if hasattr(matrix, 'toarray') else np.asarray(matrix)
+
+
+def normalized_shap_feature_name(transformed_name: str) -> str:
+    base_name = transformed_name.split('__', 1)[1] if '__' in transformed_name else transformed_name
+    for column in CATEGORICAL_FEATURES:
+        prefix = f'{column}_'
+        if base_name.startswith(prefix):
+            return column
+    return base_name
+
+
+def build_shap_explainer() -> None:
+    global shap_explainer, shap_feature_names
+    if model is None:
+        shap_explainer = None
+        shap_feature_names = []
+        return
+    if not SHAP_BACKGROUND_PATH.exists():
+        logging.warning('SHAP background file %s not found; local explanations disabled', SHAP_BACKGROUND_PATH)
+        shap_explainer = None
+        shap_feature_names = []
+        return
+
+    background = pd.read_parquet(SHAP_BACKGROUND_PATH)
+    if background.empty:
+        shap_explainer = None
+        shap_feature_names = []
+        return
+
+    preprocessor = model.named_steps['preprocessor']
+    classifier = model.named_steps['classifier']
+    shap_feature_names = list(preprocessor.get_feature_names_out())
+    background_matrix = to_dense_matrix(preprocessor.transform(background[FEATURE_COLUMNS]))
+    shap_explainer = shap.LinearExplainer(classifier, background_matrix)
 
 
 def json_response(
@@ -164,25 +210,38 @@ def json_safe_value(value):
 
 
 def top_reason_codes(features: pd.DataFrame, limit: int = 5) -> list[dict[str, object]]:
-    if not feature_importance:
+    if shap_explainer is None or not shap_feature_names:
         return []
 
+    row = features[FEATURE_COLUMNS]
+    transformed = to_dense_matrix(model.named_steps['preprocessor'].transform(row))
+    shap_values = shap_explainer.shap_values(transformed)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    values = np.asarray(shap_values)[0]
+    original_row = features.iloc[0].to_dict()
+
     reasons = []
-    row = features.iloc[0].to_dict()
-    for item in feature_importance[:limit]:
-        feature = str(item['feature'])
+    ranked_indexes = np.argsort(np.abs(values))[::-1][:limit]
+    for index in ranked_indexes:
+        transformed_name = shap_feature_names[index]
+        raw_feature = normalized_shap_feature_name(transformed_name)
         reasons.append(
-                {
-                    'feature': feature,
-                    'importance': float(item['importance_mean']),
-                    'value': json_safe_value(row.get(feature)),
-                }
-            )
+            {
+                'feature': raw_feature,
+                'shap_feature': transformed_name,
+                'shap_value': float(values[index]),
+                'value': json_safe_value(original_row.get(raw_feature)),
+            }
+        )
     return reasons
 
 
 def predict(request: dict[str, object]) -> dict[str, object]:
-    customer_id = int(request['customer_id'])
+    customer_id_raw = request.get('customer_id', request.get('user_id'))
+    if customer_id_raw is None:
+        raise KeyError('customer_id')
+    customer_id = int(customer_id_raw)
     features, used_defaults = fetch_features(customer_id)
     if used_defaults:
         FEAST_FALLBACKS.inc()
@@ -243,4 +302,5 @@ if __name__ == '__main__':
     mlflow.set_tracking_uri(MLFLOW_URI)
     load_reports()
     model = load_model()
+    build_shap_explainer()
     run_server()

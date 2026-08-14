@@ -4,3 +4,4 @@ pandas
 prometheus-client
 redis
 scikit-learn
+shap

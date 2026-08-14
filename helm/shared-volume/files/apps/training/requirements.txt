@@ -2,6 +2,7 @@ mlflow
 numpy
 pandas
 scikit-learn
+shap
 deltalake
 pyarrow
 prometheus-client
