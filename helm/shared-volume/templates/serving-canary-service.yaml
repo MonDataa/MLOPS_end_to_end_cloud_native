@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-serving-canary
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: mlops-serving-canary
+  ports:
+    - port: {{ .Values.serving.port }}
+      targetPort: {{ .Values.serving.port }}

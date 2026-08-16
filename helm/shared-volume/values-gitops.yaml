@@ -1,0 +1,5 @@
+images:
+  training: ghcr.io/mondataa/mlops-training:latest
+  trainingPullPolicy: Always
+  serving: ghcr.io/mondataa/mlops-serving:latest
+  servingPullPolicy: Always

@@ -13,7 +13,9 @@ images:
   redis: redis:7-alpine
   python: python:3.11-slim
   training: mlops-training:latest
+  trainingPullPolicy: IfNotPresent
   serving: mlops-serving:latest
+  servingPullPolicy: IfNotPresent
   prometheus: prom/prometheus:v2.50.0
   pushgateway: prom/pushgateway:v1.8.0
   grafana: grafana/grafana:10.1.4
@@ -23,6 +25,8 @@ resources: {}
 serving:
   replicas: 1
   port: 8080
+  canaryReplicas: 1
+  canaryModelStage: Production
 prometheus:
   replicas: 1
   port: 9090
@@ -32,3 +36,10 @@ pushgateway:
 grafana:
   replicas: 1
   port: 3000
+drift:
+  schedule: "*/30 * * * *"
+  psiThreshold: 0.2
+  autoRetrainOnDrift: true
+  sampleSize: 500
+trainingCron:
+  schedule: "0 2 * * *"

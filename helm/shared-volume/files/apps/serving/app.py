@@ -21,6 +21,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 
 MLFLOW_URI = os.environ.get('MLFLOW_TRACKING_URI', 'sqlite:////shared/mlflow/mlflow.db')
 MODEL_NAME = 'mlops-production-model'
+EXPERIMENT_NAME = 'credit-risk'
+MODEL_STAGE = os.environ.get('MODEL_STAGE', 'Production')
 SERVER_HOST = '0.0.0.0'
 SERVER_PORT = int(os.environ.get('SERVING_PORT', '8080'))
 REPORT_ROOT = Path(os.environ.get('MODEL_REPORT_ROOT', '/shared/model_reports'))
@@ -84,14 +86,48 @@ shap_feature_names: list[str] = []
 
 
 def find_model_uri(client: mlflow.tracking.MlflowClient) -> str:
-    versions = client.get_latest_versions(MODEL_NAME, stages=['Production'])
+    if MODEL_STAGE.lower() in {'latest', 'latest-run', 'candidate'}:
+        experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
+        if experiment is not None:
+            runs = list(
+                client.search_runs(
+                    experiment_ids=[experiment.experiment_id],
+                    order_by=['attributes.start_time DESC'],
+                    max_results=10,
+                )
+            )
+            for run in runs:
+                artifacts = client.list_artifacts(run.info.run_id, path='model')
+                if artifacts:
+                    return run.info.artifact_uri.rstrip('/') + '/model'
+            logging.warning(
+                'No valid latest-run model artifact found in experiment %s; falling back to Production',
+                EXPERIMENT_NAME,
+            )
+
+    stage_to_load = 'Production' if MODEL_STAGE.lower() in {'latest', 'latest-run', 'candidate'} else MODEL_STAGE
+    versions = client.get_latest_versions(MODEL_NAME, stages=[stage_to_load])
     if versions:
         return versions[0].source
 
-    runs = list(client.search_runs(order_by=['attributes.start_time DESC'], max_results=1))
+    experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
+    if experiment is not None:
+        runs = list(
+            client.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                order_by=['attributes.start_time DESC'],
+                max_results=1,
+            )
+        )
+    else:
+        runs = list(client.search_runs(order_by=['attributes.start_time DESC'], max_results=1))
     if not runs:
         raise RuntimeError('No MLflow model available')
-    return runs[0].info.artifact_uri.rstrip('/') + '/model'
+    model_uri = runs[0].info.artifact_uri.rstrip('/') + '/model'
+    artifacts = client.list_artifacts(runs[0].info.run_id, path='model')
+    if not artifacts:
+        raise RuntimeError(f'No model artifact found at {model_uri}')
+    return model_uri
 
 
 def load_model() -> mlflow.pyfunc.PyFuncModel:

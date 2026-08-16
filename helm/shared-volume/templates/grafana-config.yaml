@@ -44,16 +44,19 @@ data:
       "annotations": {"list": []},
       "editable": false,
       "panels": [
-        {"type": "stat", "title": "Requests (5 min)", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "sum(increase(mlops_prediction_requests_total[5m]))", "refId": "A"}], "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0}},
-        {"type": "stat", "title": "Prediction errors (5 min)", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "sum(increase(mlops_prediction_errors_total[5m]))", "refId": "A"}], "gridPos": {"h": 7, "w": 8, "x": 8, "y": 0}},
-        {"type": "stat", "title": "Feature fallbacks (5 min)", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "sum(increase(mlops_feature_fallbacks_total[5m]))", "refId": "A"}], "gridPos": {"h": 7, "w": 8, "x": 16, "y": 0}},
+        {"type": "stat", "title": "Requests (5 min)", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "sum(increase(mlops_prediction_requests_total[5m]))", "refId": "A"}], "gridPos": {"h": 7, "w": 6, "x": 0, "y": 0}},
+        {"type": "stat", "title": "Prediction errors (5 min)", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "sum(increase(mlops_prediction_errors_total[5m]))", "refId": "A"}], "gridPos": {"h": 7, "w": 6, "x": 6, "y": 0}},
+        {"type": "stat", "title": "Feature fallbacks (5 min)", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "sum(increase(mlops_feature_fallbacks_total[5m]))", "refId": "A"}], "gridPos": {"h": 7, "w": 6, "x": 12, "y": 0}},
+        {"type": "stat", "title": "Max drift PSI", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "max(mlops_job_custom_metric{job=\"drift_monitor\",metric=\"drift_max_psi\"})", "refId": "A"}], "gridPos": {"h": 7, "w": 6, "x": 18, "y": 0}},
         {"type": "timeseries", "title": "Prediction latency p95", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "histogram_quantile(0.95, sum(rate(mlops_prediction_latency_seconds_bucket[5m])) by (le))", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7}},
         {"type": "timeseries", "title": "Pipeline last run duration", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "mlops_job_last_run_duration_seconds", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7}},
         {"type": "table", "title": "Pipeline health", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "mlops_job_last_run_success", "format": "table", "instant": true, "refId": "A"}, {"expr": "mlops_job_last_run_rows", "format": "table", "instant": true, "refId": "B"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15}},
-        {"type": "timeseries", "title": "Data quality and model metrics", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "mlops_job_custom_metric", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15}}
+        {"type": "timeseries", "title": "Data quality and model metrics", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "mlops_job_custom_metric", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15}},
+        {"type": "stat", "title": "Retrain requested", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "max(mlops_job_custom_metric{job=\"drift_monitor\",metric=\"drift_needs_retrain\"})", "refId": "A"}], "gridPos": {"h": 7, "w": 6, "x": 0, "y": 23}},
+        {"type": "stat", "title": "Retrain executed", "datasource": {"uid": "prometheus"}, "targets": [{"expr": "max(mlops_job_custom_metric{job=\"drift_monitor\",metric=\"drift_retrained\"})", "refId": "A"}], "gridPos": {"h": 7, "w": 6, "x": 6, "y": 23}}
       ],
       "schemaVersion": 39,
       "title": "MLOps Overview",
       "uid": "mlops-overview",
-      "version": 1
+      "version": 2
     }

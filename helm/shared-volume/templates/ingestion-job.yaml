@@ -3,9 +3,19 @@ kind: Job
 metadata:
   name: mlops-ingest
   namespace: {{ .Release.Namespace }}
+  labels:
+    app: mlops-ingest
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
 spec:
   backoffLimit: 1
+  selector:
+    matchLabels:
+      app: mlops-ingest
   template:
+    metadata:
+      labels:
+        app: mlops-ingest
     spec:
       initContainers:
         - name: sync-repo

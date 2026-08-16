@@ -20,6 +20,8 @@ data:
 {{ .Files.Get "files/apps/serving/requirements.txt" | indent 4 }}
   apps_monitoring_metrics_py: |-
 {{ .Files.Get "files/apps/monitoring/metrics.py" | indent 4 }}
+  apps_monitoring_drift_py: |-
+{{ .Files.Get "files/apps/monitoring/drift.py" | indent 4 }}
   apps_monitoring___init___py: |-
 {{ .Files.Get "files/apps/monitoring/__init__.py" | indent 4 }}
   data_raw_customers_csv: |-
@@ -52,6 +54,7 @@ data:
     apps_serving_app_py=apps/serving/app.py
     apps_serving_requirements_txt=apps/serving/requirements.txt
     apps_monitoring_metrics_py=apps/monitoring/metrics.py
+    apps_monitoring_drift_py=apps/monitoring/drift.py
     apps_monitoring___init___py=apps/monitoring/__init__.py
     data_raw_customers_csv=data/raw/customers.csv
     data_raw_loan_applications_csv=data/raw/loan_applications.csv

@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mlops-drift-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: {{ .Values.drift.schedule | quote }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: drift-monitor
+              image: {{ .Values.images.training }}
+              imagePullPolicy: {{ .Values.images.trainingPullPolicy | default "IfNotPresent" }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  python /shared/apps/monitoring/drift.py
+              env:
+                - name: PYTHONPATH
+                  value: /shared
+                - name: PUSHGATEWAY_URL
+                  value: http://mlops-pushgateway:{{ .Values.pushgateway.port }}
+                - name: MLFLOW_TRACKING_URI
+                  value: sqlite:////shared/mlflow/mlflow.db
+                - name: GOLD_FEATURES_PATH
+                  value: /shared/lake/gold/credit_risk_features
+                - name: MODEL_REPORT_ROOT
+                  value: /shared/model_reports
+                - name: DRIFT_PSI_THRESHOLD
+                  value: "{{ .Values.drift.psiThreshold }}"
+                - name: AUTO_RETRAIN_ON_DRIFT
+                  value: "{{ .Values.drift.autoRetrainOnDrift }}"
+                - name: DRIFT_SAMPLE_SIZE
+                  value: "{{ .Values.drift.sampleSize }}"
+              volumeMounts:
+                - name: shared
+                  mountPath: /shared
+          volumes:
+            - name: shared
+{{- if .Values.sharedVolume.useHostPath }}
+              hostPath:
+                path: {{ .Values.sharedVolume.hostPath }}
+                type: DirectoryOrCreate
+{{- else }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.pvc.name }}
+{{- end }}

@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mlops-serving
+  name: mlops-serving-canary
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: {{ .Values.serving.replicas }}
+  replicas: {{ .Values.serving.canaryReplicas }}
   selector:
     matchLabels:
-      app: mlops-serving
+      app: mlops-serving-canary
   template:
     metadata:
       labels:
-        app: mlops-serving
+        app: mlops-serving-canary
     spec:
       initContainers:
         - name: sync-repo
@@ -42,12 +42,18 @@ spec:
               value: sqlite:////shared/mlflow/mlflow.db
             - name: SERVING_PORT
               value: "{{ .Values.serving.port }}"
-            - name: MODEL_STAGE
-              value: Production
             - name: PYTHONPATH
               value: /shared
+            - name: MODEL_STAGE
+              value: "{{ .Values.serving.canaryModelStage }}"
           ports:
             - containerPort: {{ .Values.serving.port }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.serving.port }}
+            failureThreshold: 60
+            periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /healthz

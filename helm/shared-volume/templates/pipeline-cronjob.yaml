@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mlops-pipeline-cron
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: {{ .Values.trainingCron.schedule | quote }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pipeline
+              image: {{ .Values.images.training }}
+              imagePullPolicy: {{ .Values.images.trainingPullPolicy | default "IfNotPresent" }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  pip install --no-cache-dir 'feast[redis]' && \
+                  python /shared/apps/ingestion/ingest.py && \
+                  python /shared/apps/features/build_features.py && \
+                  python /shared/apps/training/train.py
+              env:
+                - name: PYTHONPATH
+                  value: /shared
+                - name: PUSHGATEWAY_URL
+                  value: http://mlops-pushgateway:{{ .Values.pushgateway.port }}
+                - name: MLFLOW_TRACKING_URI
+                  value: sqlite:////shared/mlflow/mlflow.db
+                - name: GOLD_FEATURES_PATH
+                  value: /shared/lake/gold/credit_risk_features
+                - name: MODEL_REPORT_ROOT
+                  value: /shared/model_reports
+              volumeMounts:
+                - name: shared
+                  mountPath: /shared
+          volumes:
+            - name: shared
+{{- if .Values.sharedVolume.useHostPath }}
+              hostPath:
+                path: {{ .Values.sharedVolume.hostPath }}
+                type: DirectoryOrCreate
+{{- else }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.pvc.name }}
+{{- end }}

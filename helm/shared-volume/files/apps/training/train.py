@@ -30,6 +30,7 @@ MLFLOW_ARTIFACT_ROOT = os.environ.get('MLFLOW_ARTIFACT_ROOT', 'file:///shared/ml
 MODEL_NAME = 'mlops-production-model'
 GOLD_PATH = Path(os.environ.get('GOLD_FEATURES_PATH', '/shared/lake/gold/credit_risk_features'))
 REPORT_ROOT = Path(os.environ.get('MODEL_REPORT_ROOT', '/shared/model_reports'))
+REFERENCE_FEATURES_PATH = REPORT_ROOT / 'reference_features.parquet'
 SHAP_BACKGROUND_PATH = REPORT_ROOT / 'shap_background.parquet'
 SHAP_SUMMARY_PATH = REPORT_ROOT / 'shap_summary.csv'
 TARGET_COLUMN = 'defaulted'
@@ -155,6 +156,11 @@ def build_shap_reports(model: Pipeline, x_train: pd.DataFrame, x_test: pd.DataFr
     return summary
 
 
+def save_reference_features(x_train: pd.DataFrame) -> None:
+    REFERENCE_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    x_train[FEATURE_COLUMNS].copy().to_parquet(REFERENCE_FEATURES_PATH, index=False)
+
+
 def group_rates(frame: pd.DataFrame, group_column: str, predictions: np.ndarray) -> dict[str, dict[str, float]]:
     scored = frame[[group_column, TARGET_COLUMN]].copy()
     scored['prediction'] = predictions
@@ -250,6 +256,7 @@ def main() -> None:
         test_frame = x_test.copy()
         test_frame[TARGET_COLUMN] = y_test.to_numpy()
         fairness_report, fairness_metrics = build_fairness_report(test_frame, predictions)
+        save_reference_features(x_train)
         shap_summary = build_shap_reports(model, x_train, x_test)
 
         report_payload = {
@@ -288,6 +295,7 @@ def main() -> None:
             mlflow.log_metric('test_rows', len(x_test))
             mlflow.log_artifact(str(REPORT_ROOT / 'fairness_report.json'), artifact_path='governance')
             mlflow.log_artifact(str(REPORT_ROOT / 'model_card.json'), artifact_path='governance')
+            mlflow.log_artifact(str(REFERENCE_FEATURES_PATH), artifact_path='monitoring')
             mlflow.log_artifact(str(SHAP_BACKGROUND_PATH), artifact_path='explainability')
             mlflow.log_artifact(str(SHAP_SUMMARY_PATH), artifact_path='explainability')
             mlflow.sklearn.log_model(
