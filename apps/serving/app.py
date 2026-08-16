@@ -12,6 +12,7 @@ from wsgiref.simple_server import make_server
 
 import mlflow
 import mlflow.sklearn
+from mlflow.exceptions import MlflowException, RestException
 import numpy as np
 import pandas as pd
 import shap
@@ -106,7 +107,16 @@ def find_model_uri(client: mlflow.tracking.MlflowClient) -> str:
             )
 
     stage_to_load = 'Production' if MODEL_STAGE.lower() in {'latest', 'latest-run', 'candidate'} else MODEL_STAGE
-    versions = client.get_latest_versions(MODEL_NAME, stages=[stage_to_load])
+    versions = []
+    try:
+        versions = client.get_latest_versions(MODEL_NAME, stages=[stage_to_load])
+    except (MlflowException, RestException) as exc:
+        logging.warning(
+            'Registered model %s not found in registry (%s); falling back to latest run',
+            MODEL_NAME,
+            exc,
+        )
+
     if versions:
         return versions[0].source
 
@@ -298,16 +308,23 @@ def application(environ, start_response):
     path = environ.get('PATH_INFO', '/')
 
     if path == '/healthz' and method == 'GET':
+        status = HTTPStatus.OK if model is not None else HTTPStatus.SERVICE_UNAVAILABLE
         return json_response(
             start_response,
-            HTTPStatus.OK,
-            {'status': 'ok', 'model_loaded': model is not None, 'use_case': 'credit_default_risk'},
+            status,
+            {'status': 'ok' if model is not None else 'degraded', 'model_loaded': model is not None, 'use_case': 'credit_default_risk'},
         )
 
     if path == '/fairness' and method == 'GET':
         return json_response(start_response, HTTPStatus.OK, fairness_report)
 
     if path in {'/predict', '/explain'} and method == 'POST':
+        if model is None:
+            return json_response(
+                start_response,
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {'error': 'model not loaded yet'},
+            )
         PREDICTION_REQUESTS.inc()
         with PREDICTION_LATENCY.time():
             try:
@@ -337,6 +354,10 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     mlflow.set_tracking_uri(MLFLOW_URI)
     load_reports()
-    model = load_model()
-    build_shap_explainer()
+    try:
+        model = load_model()
+        build_shap_explainer()
+    except Exception:
+        logging.exception('Model not available at startup; serving in degraded mode')
+        model = None
     run_server()
